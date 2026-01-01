@@ -1,0 +1,47 @@
+# Import dependencies
+from pyspark.sql.functions import col, lower, trim, current_timestamp, lit
+
+# Read data from bronze layer
+retrieved_league_standing = spark.read \
+    .format("delta") \
+        .load("abfss://bronze@footballanalyticstorage.dfs.core.windows.net/league_standing")
+
+# Refine data
+fact_league_standing = (
+    retrieved_league_standing
+        .withColumnRenamed("id", "club_id")
+        .withColumnRenamed("shortName", "football_club")
+        .withColumn(
+            "football_club",
+            lower(trim(col("football_club")))
+        )
+        .withColumnRenamed("tla", "club_acronym")
+        .withColumnRenamed("playedGames", "total_games_played")
+        .withColumnRenamed("goalsFor", "total_goals_scored")
+        .withColumnRenamed("goalsAgainst", "total_goals_conceded")
+        .withColumnRenamed("goalDifference", "goal_difference")
+        .withColumn("injestion_ts", current_timestamp())
+        .withColumn("source", lit("football-data.org"))
+        .drop("crest")
+        .drop("name")
+        .drop("football_club")
+        .drop("club_acronym")
+        .select(
+            "club_id",
+            "total_games_played",
+            "won",
+            "draw",
+            "lost",
+            "total_goals_scored",
+            "total_goals_conceded",
+            "goal_difference",
+            "points"
+        )
+)
+
+
+# Write data to silver layer
+fact_league_standing.write \
+    .format("delta") \
+        .mode("append") \
+            .save("abfss://silver@footballanalyticstorage.dfs.core.windows.net/fact_league_standing")

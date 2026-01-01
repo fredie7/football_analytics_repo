@@ -1,0 +1,53 @@
+# Import dependencies
+from pyspark.sql.functions import regexp_replace, trim, lower, split, array_distinct, col, lit, current_timestamp, sha2, concat_ws
+
+# Read in silver data for the football clubs
+retrieved_clubs_data = spark.read \
+    .format("delta") \
+        .load("abfss://bronze@footballanalyticstorage.dfs.core.windows.net/clubs_info")
+
+# Display the football clubs data
+display(retrieved_clubs_data)
+
+# Create & refine staging table for football clubs data
+dim_football_clubs = (
+    retrieved_clubs_data
+    .withColumnRenamed("id", "club_id")
+    .withColumnRenamed("shortName", "football_club")
+    .withColumn("football_club", lower(trim(col("football_club"))))
+
+    .withColumnRenamed("tla", "club_abbreviation")
+    .withColumn("club_abbreviation", trim(col("club_abbreviation")))
+
+    .withColumnRenamed("crest", "club_logo")
+    .withColumn("club_logo", trim(col("club_logo")))
+
+    .withColumnRenamed("address", "club_address")
+    .withColumn("club_address", lower(trim(col("club_address"))))
+
+    .withColumnRenamed("website", "club_website")
+    .withColumn("club_website", trim(col("club_website")))
+
+    .withColumn("venue", lower(trim(col("venue"))))
+    .withColumn(
+        "venue",
+        regexp_replace(
+        col("venue"),
+        r"['-]",
+        ""
+        )
+    )
+
+    # audit fields
+    .withColumn("ingestion_ts", current_timestamp())
+    .withColumn("data_source", lit("football-data.org"))
+
+    # remove unnecessary fields
+    .drop("name", "clubColors", "runningCompetitions")
+)
+
+# Write data to silver layer
+dim_football_clubs.write \
+    .format("delta") \
+        .mode("overwrite") \
+            .save("abfss://silver@footballanalyticstorage.dfs.core.windows.net/dim_football_clubs")

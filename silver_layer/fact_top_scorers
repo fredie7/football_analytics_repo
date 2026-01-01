@@ -1,0 +1,59 @@
+# Import dependencies
+from pyspark.sql.functions import regexp_replace, trim, lower, split, array_distinct, col, to_date,lit, when, current_timestamp
+
+# Read data from bronze layer
+retrieved_top_scorers = spark.read \
+    .format("delta") \
+        .load("abfss://bronze@footballanalyticstorage.dfs.core.windows.net/top_scorers")
+
+# Show top scorers data
+display(retrieved_top_scorers)
+
+# Refine data
+fact_top_scorers = (
+    retrieved_top_scorers.withColumnRenamed("playedMatches", "total_matches_played")
+    .withColumn(
+        "football_club",
+        regexp_replace(
+            lower(trim(col("football_club"))),
+            r"\s+fc$",
+            ""
+        )
+    )
+    .withColumn(
+        "football_club",
+        regexp_replace(
+            col("football_club"),
+            r"[&-]",
+            ""
+        )
+    )
+    .withColumnRenamed("section", "position")
+     .withColumn(
+        "position",
+        regexp_replace(
+            col("position"),
+            r"[-]",
+            " "
+        )
+    )
+     .withColumn("injestion_ts", current_timestamp())
+     .withColumn("source", lit("football-data.org"))
+     .dropDuplicates(["player_id"])
+     .select("player_id", "club_id", "total_matches_played", "goals", "assists", "penalties", "injestion_ts")
+)
+
+# Replace  null values with 0 for no assists nor penalties
+contribution_stats = ["assists", "penalties"]
+for stat in contribution_stats:
+    fact_top_scorers = (
+        fact_top_scorers.withColumn(stat, when(col(stat).isNull(), lit(0)).otherwise(col(stat)))
+    )
+
+display(fact_top_scorers)
+
+# Write data to silver layer
+fact_top_scorers.write \
+    .format("delta") \
+        .mode("append") \
+            .save("abfss://silver@footballanalyticstorage.dfs.core.windows.net/fact_top_scorers")

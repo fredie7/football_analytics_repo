@@ -1,0 +1,180 @@
+# Import dependencies
+from pyspark.sql.functions import col, lit, current_timestamp, when, sha2, concat_ws
+from delta.tables import DeltaTable
+
+%md
+Create a delta table & include surrogate key
+
+%sql
+CREATE TABLE IF NOT EXISTS dim_players (
+  player_sk BIGINT GENERATED ALWAYS AS IDENTITY,
+  player_id INT,
+  club_id INT,
+  player_name STRING,
+  position STRING,
+  date_of_birth DATE,
+  player_nationality STRING,
+  valid_from TIMESTAMP,
+  valid_to TIMESTAMP,
+  is_current BOOLEAN,
+  ingestion_ts TIMESTAMP,
+  source STRING,
+  record_hash STRING
+)
+USING DELTA
+-- LOCATION " "
+
+# Import players' data from the datalake
+silver_players = spark.read \
+    .format("delta") \
+        .load("abfss://silver@footballanalyticstorage.dfs.core.windows.net/dim_players")
+
+# Perform SCD Tyoe-2 upsert
+
+# Define an object for the existing table
+dim_players = DeltaTable.forName(spark, 'dim_players')
+
+# For the update operation,
+
+# Define the business key
+business_key = "player_id"
+
+# Define the columns that should be compared before updating
+compare_cols = [
+    "club_id",
+    "player_name",
+    "position",
+    "date_of_birth",
+    "player_nationality",
+    "record_hash"
+]
+
+# Define the conditions for updating the existing table
+change_conditions = " OR ".join([
+    f"(target.{c} != source.{c} OR " 
+    f"(target.{c} IS NULL AND source.{c} IS NOT NULL) OR "
+    f"(target.{c} IS NOT NULL AND source.{c} IS NULL))"
+    for c in compare_cols
+])
+
+# Perform update
+dim_players.alias("target").merge(
+    silver_players.alias("source"),
+    f"""
+    target.{business_key} = source.{business_key}
+    AND target.is_current = true
+    AND ({change_conditions})
+    """
+).whenMatchedUpdate(
+    set={
+        "valid_to": "current_timestamp()",
+        "is_current": "false",
+        "ingestion_ts": "current_timestamp()"
+    }
+).execute()
+
+# For insert operation,
+
+# Get the new player
+new_player = (
+    silver_players
+    .withColumn("valid_from", current_timestamp())
+    .withColumn("valid_to", lit(None).cast("timestamp"))
+    .withColumn("is_current", lit(True))
+    .withColumn("ingestion_ts", current_timestamp())
+    .withColumn("source", lit("silver_players")) 
+)
+
+# Perform insert
+dim_players.alias("target").merge(
+    new_player.alias("source"),
+    "target.player_id = source.player_id AND target.is_current = true"
+).whenNotMatchedInsert(
+    values={c: f"source.{c}" for c in new_player.columns}
+).execute()
+
+# Confirm the table outlook & Show the current row count of the data
+display(spark.table('dim_players'))
+
+// Test code for possible upsert
+# Test for SCD Type-2 
+silver_players = (
+    silver_players
+    .withColumn(
+        "player_name",
+        when(col("player_id") == 88, "Ronaldinho Gaucho")
+        .otherwise(col("player_name"))
+    )
+    .withColumn(
+        "record_hash",
+    sha2(
+        concat_ws(
+            "||",
+            col("player_id"),
+            col("club_id"),
+            col("player_name"),
+            col("position"),
+            col("date_of_birth"),
+            col("player_nationality")
+        ),
+        256
+    )
+    )
+)
+
+// Confirm changes
+%sql
+SELECT
+  player_id,
+  player_name,
+  valid_from,
+  valid_to,
+  is_current
+FROM dim_players
+WHERE player_id = 88
+ORDER BY valid_from;
+
+// Test for inserts
+%sql
+INSERT INTO dim_players (
+    player_id,
+    club_id,
+    player_name,
+    position,
+    date_of_birth,
+    player_nationality,
+    valid_from,
+    valid_to,
+    is_current,
+    ingestion_ts,
+    source,
+    record_hash
+)
+VALUES (
+    445,
+    57,
+    'Mario Gotze',
+    'midfielder',
+    DATE '2000-12-30',
+    'germany',
+    TIMESTAMP '2025-12-27 18:19:49',
+    NULL,
+    TRUE,
+    TIMESTAMP '2025-12-27 18:19:49',
+    'football_data.org',
+    'sljkhshbs8979'
+);
+
+%sql
+select * from dim_players where player_name = 'Mario Gotze'
+
+Optimize table
+%sql
+OPTIMIZE dim_players ZORDER BY (player_id)
+
+# Write players data to delta lake gold layer
+dim_players.toDF() \
+    .write \
+        .format("delta") \
+             .mode("overwrite") \
+                .save("abfss://gold@footballanalyticstorage.dfs.core.windows.net/dim_players")

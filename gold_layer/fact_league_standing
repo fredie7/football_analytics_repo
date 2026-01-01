@@ -1,0 +1,59 @@
+from pyspark.sql.functions import col, lit, current_timestamp, when, lit
+from delta.tables import DeltaTable
+
+silver_league_standing = spark.read \
+  .format("delta") \
+      .load("abfss://silver@footballanalyticstorage.dfs.core.windows.net/fact_league_standing")
+
+%sql
+CREATE TABLE IF NOT EXISTS fact_league_table (
+  club_id LONG,
+  total_games_played LONG,
+  won LONG,
+  draw LONG,
+  lost LONG,
+  total_goals_scored LONG,
+  total_goals_conceded LONG,
+  goal_difference LONG,
+  points LONG,
+  updated_at TIMESTAMP
+)
+USING DELTA
+-- LOCATION '/mnt/datalake/silver/league_standing';
+
+# Write data to the delta table
+silver_league_standing.write \
+    .format("delta") \
+        .mode("overwrite") \
+            .option("overwriteSchema", "true") \
+                .saveAsTable("fact_league_table")
+
+%sql
+select * from fact_league_table
+
+# Prepare the fact_league_standing table
+fact_league_standing = (
+    spark.table("fact_league_table").alias("l")
+    .join(
+        spark.table("dim_managers").alias("m"),
+        col("l.club_id") == col("m.club_id"),
+        "inner"
+    )
+    .join(
+        spark.table("dim_players").alias("p"),
+        col("l.club_id") == col("p.club_id"),
+        "inner"
+    )
+    .select(
+        col("m.manager_sk"),
+        col("p.player_sk"),
+        col("l.*")
+    )
+    .withColumn("updated_at", current_timestamp())
+)
+
+# Write table to delta lake
+fact_league_standing.write \
+    .format("delta") \
+        .mode("overwrite") \
+            .save("abfss://gold@footballanalyticstorage.dfs.core.windows.net/fact_league_standing")
